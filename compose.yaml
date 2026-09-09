@@ -1,0 +1,19 @@
+name: emberkeep
+services:
+  db:
+    image: postgres:17
+    ports:
+      - "127.0.0.1:55432:5432"
+    environment:
+      POSTGRES_DB: emberkeep
+      POSTGRES_USER: emberkeep
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - emberkeep_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emberkeep -d emberkeep"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+volumes:
+  emberkeep_data:
