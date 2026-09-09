@@ -16,6 +16,7 @@ import psycopg
 from cryptography.fernet import Fernet
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -27,15 +28,41 @@ logger=logging.getLogger(__name__)
 if (ROOT/'.env').exists():
     for line in (ROOT/'.env').read_text().splitlines():
         if '=' in line and not line.startswith('#'):
-            k,v=line.split('=',1); os.environ.setdefault(k,v)
+            k,v=line.split('=',1)
+            v=v.strip()
+            if len(v)>=2 and v[0]==v[-1] and v[0] in ('"',"'"): v=v[1:-1]
+            os.environ.setdefault(k,v)
 
-def db(): return psycopg.connect(os.environ['DATABASE_URL'], row_factory=dict_row)
+def db():
+    return psycopg.connect(
+        os.environ['DATABASE_URL'],
+        row_factory=dict_row,
+        connect_timeout=int(os.environ.get('DB_CONNECT_TIMEOUT','10')),
+        application_name='emberkeep',
+    )
 def digest(s): return hashlib.sha256(s.encode()).hexdigest()
 def cipher(): return Fernet(os.environ['SECRET_KEY'].encode())
+def secure_cookies():
+    configured=os.environ.get('COOKIE_SECURE')
+    return configured.lower() in ('1','true','yes') if configured is not None else os.environ.get('APP_ORIGIN','').startswith('https://')
+
+class ExportedSiteFiles(StaticFiles):
+    """Serve exported routes such as /admin from their admin.html file."""
+    async def get_response(self,path,scope):
+        response=await super().get_response(path,scope)
+        if response.status_code==404 and path and not Path(path.rstrip('/')).suffix:
+            return await super().get_response(path.rstrip('/')+'.html',scope)
+        return response
 
 @asynccontextmanager
 async def lifespan(app):
+    missing=[name for name in ('DATABASE_URL','ADMIN_PASSWORD','SECRET_KEY') if not os.environ.get(name)]
+    if missing: raise RuntimeError('Missing required environment variables: '+', '.join(missing))
+    cipher()  # Fail startup immediately if SECRET_KEY is not a valid Fernet key.
     with db() as c:
+        # Multiple replicas may start together. Serialize idempotent schema setup
+        # through Postgres so deployment does not race on a fresh Neon database.
+        c.execute("SELECT pg_advisory_xact_lock(hashtext('emberkeep-schema'))")
         c.execute((ROOT/'server/schema.sql').read_text())
         if not c.execute('SELECT version FROM ai_configs LIMIT 1').fetchone():
             c.execute('INSERT INTO ai_configs(config) VALUES (%s)',(Jsonb(dict(mode='template',model='',temperature=0.7,max_tokens=300,voice='af_heart')),))
@@ -157,7 +184,7 @@ def join(body:Join,request:Request,response:Response):
             draft=dict(class_id=None,gear='',attributes=dict.fromkeys(ATTRS,8),skills=dict.fromkeys(SKILLS,0)))
         c.execute('INSERT INTO identities VALUES (%s,%s,%s)',(digest(token),pid,sid))
         persist(c,sid,w,str(uuid.uuid4()),dict(type='joined',player=pid))
-    response.set_cookie('player',token,httponly=True,samesite='strict',max_age=60*60*24*30)
+    response.set_cookie('player',token,httponly=True,secure=secure_cookies(),samesite='strict',max_age=60*60*24*30)
     return view(w,pid,sid)
 
 @app.get('/api/session')
@@ -184,7 +211,7 @@ def leave(request:Request,response:Response):
             c.execute('DELETE FROM entities WHERE session_id=%s AND id=%s',(sid,pid))
             persist(c,sid,w,str(uuid.uuid4()),dict(type='left',player=pid))
         c.execute('DELETE FROM identities WHERE token_hash=%s',(who['token_hash'],))
-    response.delete_cookie('player');return {'ok':True}
+    response.delete_cookie('player',secure=secure_cookies(),samesite='strict');return {'ok':True}
 
 class Command(BaseModel):
     id:str=Field(min_length=8,max_length=80)
@@ -527,13 +554,13 @@ def login(body:Login,request:Request,response:Response):
     if not secrets.compare_digest(body.password,os.environ['ADMIN_PASSWORD']): raise HTTPException(401,'Incorrect administrator password.')
     token=secrets.token_urlsafe(32)
     with db() as c: c.execute("INSERT INTO admin_tokens VALUES (%s,now()+interval '8 hours')",(digest(token),))
-    response.set_cookie('admin',token,httponly=True,samesite='strict',max_age=28800)
+    response.set_cookie('admin',token,httponly=True,secure=secure_cookies(),samesite='strict',max_age=28800)
     return {'ok':True}
 
 @app.post('/api/admin/logout')
 def logout(request:Request,response:Response):
     with db() as c: c.execute('DELETE FROM admin_tokens WHERE token_hash=%s',(digest(request.cookies.get('admin','')),))
-    response.delete_cookie('admin'); return {'ok':True}
+    response.delete_cookie('admin',secure=secure_cookies(),samesite='strict'); return {'ok':True}
 
 @app.get('/api/admin/ai')
 def config(request:Request):
@@ -672,3 +699,9 @@ def narrate(entry_id:str,request:Request):
             if e['id']==entry_id: e['prose']=prose
         c.execute('UPDATE sessions SET state=%s WHERE id=%s',(Jsonb(latest),sid))
         return {'text':prose}
+
+# In a production image the exported Vinext application is copied here. Keeping
+# this conditional preserves the existing two-process development workflow.
+web_root=ROOT/'web/dist/client'
+if web_root.is_dir():
+    app.mount('/',ExportedSiteFiles(directory=web_root,html=True),name='web')

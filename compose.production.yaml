@@ -1,0 +1,16 @@
+name: emberkeep-production
+services:
+  app:
+    build:
+      context: .
+    image: emberkeep:latest
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL to your Neon pooled connection string}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD}
+      SECRET_KEY: ${SECRET_KEY:?Set SECRET_KEY to a Fernet key}
+      APP_ORIGIN: ${APP_ORIGIN:?Set APP_ORIGIN to the public HTTPS origin}
+      COOKIE_SECURE: "true"
+      DB_CONNECT_TIMEOUT: ${DB_CONNECT_TIMEOUT:-10}

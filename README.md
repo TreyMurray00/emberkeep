@@ -81,3 +81,37 @@ Integration tests create/use a separate `emberkeep_test` database in the local c
 - Self-hosted pinned speech assets, optional WebGPU, NPC-specific voice playback, and tested browser compatibility.
 
 The local HTTP cookie setup is for development. Public hosting requires HTTPS/secure cookies, deployment-managed secrets, persistent account authentication, and operational limits. Nothing has been published externally.
+
+## Deploy the Docker image with Neon
+
+The production image contains both the statically exported web app and the FastAPI server, and exposes one HTTP port. PostgreSQL is not included in the image. On startup, the API safely creates the required tables in Neon; concurrent replicas serialize this setup with a PostgreSQL advisory lock.
+
+1. In Neon, copy the **pooled** connection string. Keep `sslmode=require&channel_binding=require` in the URL.
+2. Copy `.env.production.example` to `.env.production`, replace every placeholder, and set `APP_ORIGIN` to the public HTTPS origin without a trailing slash. Never commit this file.
+3. Generate `SECRET_KEY` with the command shown in the example file. Preserve this key across deployments and alongside database backups, because it encrypts stored AI provider credentials.
+4. Build and start the service:
+
+```powershell
+docker compose --env-file .env.production -f compose.production.yaml up -d --build
+docker compose --env-file .env.production -f compose.production.yaml ps
+```
+
+The default host port is `8000`; set `APP_PORT` in `.env.production` to change it. Check readiness at `/api/health`. Put the service behind an HTTPS reverse proxy or a container platform that terminates TLS. The deployment manifest enables secure cookies, so browser sessions intentionally require HTTPS.
+
+For a platform that accepts a Dockerfile directly, build from the repository root and configure `DATABASE_URL`, `ADMIN_PASSWORD`, `SECRET_KEY`, `APP_ORIGIN`, and `COOKIE_SECURE=true` as runtime secrets or environment variables. The image honors the platform-provided `PORT` value and runs as an unprivileged user. Do not pass build-time secrets or bake an environment file into the image.
+
+### Neon project policy
+
+The repository includes `neon.ts`, a bare Postgres-only policy for Neon project `noisy-cloud-08360518`. The local `.neon` link context and the database URLs pulled into `.env` are intentionally ignored by Git and Docker.
+
+To link a fresh checkout and apply the policy:
+
+```powershell
+npm install --global neon@latest
+neon auth
+neon link --project-id noisy-cloud-08360518 --branch production -y
+neon config plan
+neon deploy
+```
+
+Neon Skills and MCP installation are optional development tooling; they are not required to build or run the application. The FastAPI startup process creates the application schema transactionally on the linked database.

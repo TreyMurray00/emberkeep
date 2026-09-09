@@ -1,10 +1,48 @@
+# Runtime secrets and local credentials
 .env
+.env.*
+!.env.example
+!.env.production.example
+.dev.vars
+.dev.vars.*
+.neon
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+secrets*.json
+
+# Python environments, caches, and test output
 .venv/
+venv/
 __pycache__/
+*.py[cod]
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Node dependencies, package-manager state, and generated builds
+node_modules/
+.pnpm-store/
+web/.next/
+web/.vinext/
+web/dist/
+web/.wrangler/
+web/outputs/
+web/work/
+*.tsbuildinfo
+next-env.d.ts
+
+# Logs, editor metadata, and operating-system files
 *.log
 .logs/
-web/node_modules/
-web/dist/
-web/.env*
-!.env.example
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
