@@ -8,7 +8,7 @@ The initial implementation is named Emberkeep. See README.md for startup, implem
 
 A text-first cooperative fantasy role-playing game supporting one to four human players per session, a persistent world, and bounded sessions within a campaign. The AI dungeon master does not occupy a player slot. Each player controls one active character initially. Each session has an objective, a time or scene budget, and success, partial-success, and failure endings. Completion means reaching a meaningful resolution, not guaranteeing player victory. Rules are versioned and initially limited to a documented subset of one D&D SRD edition.
 
-The AI can run through a local small language model (SLM), a hosted API, or an explicitly enabled hybrid. Hardware and model quality must be measured before selecting a local model. No cloud fallback occurs when local-only mode is selected. Speech uses browser-embedded Kokoro.js on each player's device, independently of the dungeon master's model provider.
+The AI can run through a local small language model (SLM), a hosted API, or an explicitly enabled hybrid. Hardware and model quality must be measured before selecting a local model. No cloud fallback occurs when local-only mode is selected. Optional speech uses each player's built-in browser Web Speech API, independently of the dungeon master's model provider.
 
 ## Core principle
 
@@ -33,7 +33,7 @@ flowchart TD
     T --> G
     G --> C
     O --> UI
-    UI --> TTS[Browser Web Worker: Kokoro.js]
+    UI --> TTS[Browser Web Speech API]
     TTS --> Audio[Local audio playback and subtitles]
 ```
 
@@ -75,7 +75,7 @@ The web interface must be D&D-inspired: an adventurer's journal and tabletop cam
 - Party HUD: up to four portrait medallions with names, health, conditions, connection status, and an unmistakable active-turn marker. Responsive layouts wrap or collapse summaries without hiding the current player's essential resources.
 - Inventory: a satchel-themed panel with item slots or a compact list, category tabs, quantity badges, and visible equipment slots. Selecting an item opens its known description and labeled actions. All drag-and-drop operations also have button-based alternatives.
 - Action area: a clearly labeled action bar with familiar fantasy icons, resource costs, and a free-text action field. Disabled actions explain why they are unavailable. Keep primary controls in stable positions during narration and combat.
-- Voice controls: integrate a small speaker control into the journal header with visible loading status, subtitles, and accessible playback controls. The visual theme must not obscure voice download progress or failures.
+- Voice controls: integrate a small speaker control into the journal header with status, subtitles, and accessible playback controls.
 - Motion: brief dice rolls, subtle turn highlights, and restrained resource-change effects. Respect reduced-motion settings; avoid constant particles, flashing damage effects, or animation that delays access to outcomes.
 - Accessibility: visible keyboard focus, semantic controls, adequate touch targets, scalable text, and verified WCAG AA contrast. Provide a low-texture presentation option that retains the fantasy palette and layout.
 
@@ -121,7 +121,7 @@ Provide a protected /admin route with /admin/ai for configuring the dungeon mast
 - Model selection: choose local-only, hosted API, or explicitly enabled hybrid mode. Select a provider/model per task (action interpretation, world generation, session planning, NPC dialogue, narration), with a simple default model plus optional per-task overrides. List provider models when supported and allow a validated explicit model ID otherwise.
 - Generation controls: configure supported context/output limits, temperature, bounded retries, request timeouts, concurrency, and per-session token/cost budgets. Hide or disable unsupported parameters based on the adapter's capability profile. Treat cost as estimated unless reconciled with provider usage.
 - Fallbacks: explicitly configure permitted provider/model fallback order. Local-only mode forbids cloud calls. Exhausted budgets, missing credentials, and failed connections use the defined deterministic/text fallback or pause the affected AI operation without corrupting state.
-- Speech: configure the approved browser model revision, default DM voice, NPC preset pool, default speed, and tested WASM/WebGPU choices. Browser TTS requires no speech-provider API key. Personal mute, volume, and playback choices remain per-player controls.
+- Speech: browser-native narration requires no speech-provider API key. Personal mute, volume, and playback choices remain per-player controls.
 - Validation and status: offer Save Draft, Test Connection, Validate Configuration, and Activate actions. Connection tests send a minimal synthetic request and clearly indicate that an inference test may use provider credits. Display sanitized errors, supported capabilities, and last successful test time.
 
 ### Server-side security and configuration lifecycle
@@ -130,7 +130,7 @@ Protect both page access and every /api/admin endpoint with authenticated, serve
 
 API keys travel over HTTPS to the backend and remain in a server-side secret store, or encrypted at rest with the encryption key held outside the application database. AIConfig stores secret references rather than plaintext credentials. Never include secrets in browser bundles, localStorage, WebSocket payloads, model prompts, logs, exports, audit diffs, or configuration read responses. Redact provider exceptions before displaying them. Only backend provider adapters retrieve credentials for inference calls.
 
-Use typed provider adapters and approved endpoint policies. Validate schemes, hosts, ports, and redirects before server-side connection tests or model discovery. Hosted providers use approved HTTPS endpoints; deployments explicitly allow the loopback/private endpoints needed for local SLMs. Block cloud metadata endpoints and unintended destinations. Browser speech assets use approved static sources rather than arbitrary executable URLs from settings.
+Use typed provider adapters and approved endpoint policies. Validate schemes, hosts, ports, and redirects before server-side connection tests or model discovery. Hosted providers use approved HTTPS endpoints; deployments explicitly allow the loopback/private endpoints needed for local SLMs. Block cloud metadata endpoints and unintended destinations. Browser speech uses installed browser voices rather than executable assets from settings.
 
 Model configuration is versioned: draft → validated → active → retired. Validate required credentials, adapter/model capabilities, limits, and allowed fallbacks before activation. Record who changed which non-secret settings, when, and which version was activated. Record credential changes without their values. Allow rollback to an earlier valid configuration version; credential rollback is separate and cannot restore a revoked key.
 
@@ -138,36 +138,14 @@ Pin each session to an AI configuration version at creation. Apply ordinary mode
 
 Suggested persistence: AIConfigVersion, ProviderConnection, ModelTaskProfile, SpeechConfig, and AdminAuditEvent. Suggested endpoints: GET /api/admin/ai, POST /api/admin/providers, POST /api/admin/providers/{id}/test, PUT /api/admin/ai/draft, POST /api/admin/ai/validate, and POST /api/admin/ai/activate. Secret writes are write-only; reads return redacted metadata. Player-facing configuration endpoints expose only approved public speech settings and other information needed by the UI.
 
-## Browser-embedded text-to-speech
+## Browser built-in text-to-speech
 
-Selected implementation: Kokoro.js with the Kokoro-82M v1.0 ONNX model, executed on each player's device in a dedicated Web Worker. No server-side TTS inference is required. The dungeon master's SLM/API generates text; this separate speech model converts approved narration into audio.
+The client optionally uses `window.speechSynthesis` to read confirmed narration aloud. No model, Web Worker, WASM runtime, voice asset, or speech server is bundled.
 
-### Loading and runtime
-
-- Voice is opt-in through an Enable Voice control that initializes browser audio playback. Keep text immediately available while the model loads.
-- Start with the documented quantized q8 WebAssembly configuration. Offer WebGPU only after successful capability detection, initialization, and target-device testing, using a supported precision configuration. If GPU initialization fails, attempt the tested WASM configuration; if local synthesis fails, retain text-only play.
-- Pin the library version, model revision, runtime assets, and voice assets together. Serve these static assets from the application's deployment and configure their URLs explicitly. Cache versioned assets locally where browser storage permits; show download progress and retry controls. Cache eviction may require a later download.
-- Load one speech worker/model instance per client, reuse it across utterances, and bound its queue and memory usage. Release resources when voice is disabled. Model download size and runtime memory are separate measurements to record before release.
-- Keep inference off the UI thread so inventory, HUD, and player input remain responsive. Benchmark on target desktop and mobile devices; do not promise real-time synthesis on all hardware.
-
-### Narration and voice contract
-
-The server sends an authorized narration envelope containing narration_id, committed event reference, scene_id, ordered segment IDs, speaker_id, voice_id, text, and final/completion status. Only text describing committed outcomes is eligible for speech. Filter its audience before delivery; hidden facts must never enter a player's speech worker.
-
-Persist a voice profile for the DM and each voiced NPC, including a supported preset voice ID and bounded speaking speed. Use a default narrator voice when a selected voice is unavailable. Voice assignments persist across saves and model-provider changes. Voice profiles select presets; voice cloning is outside the initial scope.
-
-Send complete, stable sentences into the speech queue as narration becomes available. Do not synthesize partial tokens that may be revised. Tag each generated audio chunk with its narration and segment IDs, preserve playback order, and discard duplicate deliveries. Subtitles use the same segment text; word-level synchronization is not required initially.
-
-### Playback and four-player behavior
-
-- Each client synthesizes only its authorized text. Shared narration is delivered to the party, while private or split-scene dialogue reaches only the relevant players.
-- Provide enable/disable voice, volume, pause/resume, skip narration, replay, and speed controls alongside persistent subtitles.
-- Local playback is independent: slower synthesis or muted audio cannot block another player or a game-state commit. Game decisions use explicit action windows, not audio-completion events. Exact synchronized playback across devices is outside the initial scope.
-- Skip, scene changes, and disabling voice invalidate queued playback. Ignore late worker results using a playback-generation token; stop or restart a worker when needed to cancel expensive outstanding generation.
-- Reconnect restores text history and current state without automatically speaking the entire backlog. Replay is explicit. Keep any audio cache bounded, scoped to the authenticated player/session, and clear it on logout or session departure.
-- TTS failure never loses a turn or changes game state. Surface a concise voice-status message and continue with text. No automatic cloud speech fallback.
-
-The deployment still needs a game server for authoritative multiplayer state and a local/API DM model. Browser speech eliminates the TTS inference service, not these other components. Initial asset downloads require connectivity; cached speech assets can support local synthesis afterward, subject to browser cache availability.
+- Voice is opt-in and remains independent on each player's device; text is always available.
+- Controls include enable/mute, volume, pause/resume, skip, and replay. The browser chooses the available voice and language.
+- Speech errors and unavailable browser APIs are reported locally and never block or alter authoritative game state.
+- Reconnects restore text without replaying the backlog automatically. Replay is explicit.
 
 ## Required pre-session character building
 
@@ -344,7 +322,7 @@ Suggested gateway methods: interpretAction, proposeWorldContent, proposeBeat, wr
 - Neo4j for canonical graph state and transactional game events.
 - Versioned JSON/YAML rule definitions and encounter templates in source control.
 - Model adapters for a chosen hosted API and llama.cpp server for local inference.
-- Browser speech: Kokoro.js, pinned Kokoro-82M v1.0 ONNX assets, a dedicated Web Worker, and local browser audio playback. Quantized WASM is the baseline; WebGPU is an optional tested acceleration path.
+- Browser speech: the Web Speech API and local browser audio playback.
 - Authenticated HTTP commands and WebSockets for shared state, presence, action windows, and audience-filtered narration from the initial version.
 
 This is a starting recommendation, not a requirement. Size each session for up to four players. Local hardware, deployment target, and expected concurrent sessions remain sizing inputs. Keep game mechanics and domain commands independent of transport, database query syntax, and model provider SDKs.
@@ -373,7 +351,7 @@ This is a starting recommendation, not a requirement. Size each session for up t
 - The themed UI passes keyboard navigation, text scaling, contrast, and reduced-motion checks; decorative assets do not obscure resource values, item counts, or action labels.
 - Browser speech generates DM narration and assigned NPC voices without sending text to a TTS inference server; pinned static model/runtime assets are the only speech-related downloads.
 - The HUD and inventory remain responsive during model loading and synthesis on the supported device matrix; measure first-audio latency, sustained generation speed, and peak memory.
-- Voice enablement, loading failure, unavailable WebGPU, cache eviction, mute, skip, and text-only fallback work without blocking gameplay.
+- Voice enablement, unavailable browser speech, mute, skip, and text-only fallback work without blocking gameplay.
 - Four clients can play with different voice settings and playback speeds; private narration never reaches unauthorized clients or their speech workers.
 - Duplicate/reconnected narration does not replay automatically; scene changes and skip commands prevent late audio from playing.
 - HUD values and inventory match committed state after collection, equipment changes, resource spending/recovery, item consumption, refresh, and reconnect.
@@ -399,8 +377,6 @@ This is a starting recommendation, not a requirement. Size each session for up t
 
 ## References
 
-- Kokoro.js browser WASM/WebGPU configuration and streaming: https://github.com/hexgrad/kokoro/tree/main/kokoro.js
-- Browser model assets: https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
 - Neo4j transaction semantics: https://neo4j.com/docs/operations-manual/current/database-internals/transaction-management/
 - llama.cpp server and tool calling configuration: https://github.com/ggml-org/llama.cpp/blob/master/tools/server/README.md
 - Official SRD versions and content licensing information: https://www.dndbeyond.com/srd

@@ -65,7 +65,7 @@ async def lifespan(app):
         c.execute("SELECT pg_advisory_xact_lock(hashtext('emberkeep-schema'))")
         c.execute((ROOT/'server/schema.sql').read_text())
         if not c.execute('SELECT version FROM ai_configs LIMIT 1').fetchone():
-            c.execute('INSERT INTO ai_configs(config) VALUES (%s)',(Jsonb(dict(mode='template',model='',temperature=0.7,max_tokens=300,voice='af_heart')),))
+            c.execute('INSERT INTO ai_configs(config) VALUES (%s)',(Jsonb(dict(mode='template',model='',temperature=0.7,max_tokens=300)),))
     yield
 
 app=FastAPI(title='Emberkeep',lifespan=lifespan)
@@ -195,7 +195,6 @@ def session(request:Request):
         row=c.execute('SELECT config FROM ai_configs WHERE version=%s',(w.get('config_version'),)).fetchone() if w.get('config_version') else None
         cfg=(row or c.execute('SELECT config FROM ai_configs ORDER BY version DESC LIMIT 1').fetchone())['config']
         result['ai_enabled']=cfg.get('mode')!='template'
-        result['speech']={'voice':cfg.get('voice','af_heart')}
         return result
 
 @app.post('/api/leave')
@@ -567,7 +566,8 @@ def config(request:Request):
     with db() as c:
         admin(request,c)
         row=c.execute('SELECT * FROM ai_configs ORDER BY version DESC LIMIT 1').fetchone()
-        return {**row['config'],'version':row['version'],'has_key':bool(row['encrypted_key'])}
+        public={key:value for key,value in row['config'].items() if key != 'voice'}
+        return {**public,'version':row['version'],'has_key':bool(row['encrypted_key'])}
 
 class Config(BaseModel):
     mode:str='template'
@@ -576,13 +576,11 @@ class Config(BaseModel):
     clear_key:bool=False
     temperature:float=Field(default=0.7,ge=0,le=1.5)
     max_tokens:int=Field(default=300,ge=64,le=1000)
-    voice:str='af_heart'
     local_url:str='http://127.0.0.1:8080/v1'
 
 def checked(body):
     if body.mode not in ['template','local','openrouter']: raise HTTPException(422,'Unsupported provider.')
     if body.mode!='template' and not body.model.strip(): raise HTTPException(422,'Enter a model identifier.')
-    if body.voice not in ['af_heart','am_michael','bf_emma','bm_george']: raise HTTPException(422,'Unsupported voice.')
     try:
         parsed=urlsplit(body.local_url)
         if parsed.scheme!='http' or parsed.hostname not in ['127.0.0.1','localhost'] or not parsed.port or parsed.path.rstrip('/')!='/v1' or parsed.username or parsed.password or parsed.query or parsed.fragment:

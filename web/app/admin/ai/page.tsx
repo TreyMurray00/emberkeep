@@ -24,7 +24,6 @@ type Config = {
   model: string;
   temperature: number;
   max_tokens: number;
-  voice: string;
   version: number;
   has_key: boolean;
   local_url?: string;
@@ -102,8 +101,8 @@ export default function Admin() {
         <p className="eyebrow">ADMINISTRATION</p>
         <h1>The keeper’s study.</h1>
         <p className="muted">
-          Choose the mind behind the story, and the voice that brings it to
-          life.
+          Choose the mind behind the story. Narration uses each player’s
+          built-in browser voice when enabled.
         </p>
         {message && (
           <div className="notice" role="status">
@@ -201,31 +200,6 @@ export default function Admin() {
                   }
                   disabled={cfg.mode !== 'openrouter'}
                 />
-              </label>
-              <label>
-                Narrator voice
-                <Select
-                  value={cfg.voice}
-                  onValueChange={(v) => setCfg({ ...cfg, voice: String(v) })}
-                >
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="af_heart">
-                      Heart · American English
-                    </SelectItem>
-                    <SelectItem value="am_michael">
-                      Michael · American English
-                    </SelectItem>
-                    <SelectItem value="bf_emma">
-                      Emma · British English
-                    </SelectItem>
-                    <SelectItem value="bm_george">
-                      George · British English
-                    </SelectItem>
-                  </SelectContent>
-                </Select>
               </label>
               <label>
                 Creativity · temperature

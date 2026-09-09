@@ -92,7 +92,6 @@ export type World = {
   members: Member[];
   loot: Item[];
   side_quests: SideQuest[];
-  speech?: { voice: string };
   journal: {
     id: string;
     speaker: string;

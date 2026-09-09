@@ -250,7 +250,7 @@ def test_admin_key_encryption_and_redaction(players):
     cs,_=players;c=cs[0]
     assert c.post('/api/admin/login',json={'password':os.environ['ADMIN_PASSWORD']}).status_code==200
     baseline=c.get('/api/admin/ai').json()
-    r=c.post('/api/admin/ai',json=dict(mode='openrouter',model='test/model',api_key='test-secret-never-return-this',voice='af_heart'))
+    r=c.post('/api/admin/ai',json=dict(mode='openrouter',model='test/model',api_key='test-secret-never-return-this'))
     assert r.status_code==200
     version=r.json()['version']
     try:

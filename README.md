@@ -53,7 +53,7 @@ At session start, a configured model proposes Chapter 1 of an original five-chap
 
 During play, the model rewrites confirmed outcome text; the server alone resolves mechanics. When AI narration is enabled, the internal confirmed-outcome text is not displayed as a second entry. The graph provides scoped visible context. Provider failure after a committed action falls back to the confirmed text without rerolling or undoing the action. Generated prose is untrusted and never directly changes mechanics, inventory, or quest state.
 
-Kokoro.js runs q8/WASM inference in a browser Web Worker. Enable voice to download the model/runtime/voice files and read narration locally. The initial download can be substantial; device memory and CPU affect speed. Player text is not sent to a TTS server. The prototype obtains model assets from upstream Hugging Face/CDN sources; self-hosting and pinning those assets are still required for an offline-distribution release. Speech is optional and gameplay continues on synthesis failure. Actual audio playback must be checked on the target browsers/devices.
+Optional narration uses the browser Web Speech API (`window.speechSynthesis`). No voice model, runtime, speech assets, or TTS service is bundled or downloaded. Playback is local to each player’s device, and gameplay continues with text if browser speech is unavailable or fails.
 
 ## Persistence and correctness
 
@@ -78,7 +78,7 @@ Integration tests create/use a separate `emberkeep_test` database in the local c
 - WebSocket updates, explicit reaction windows, private player scenes, inventory transfers, and campaign management.
 - Class ability composition and balance beyond the four starter archetypes; full selected ruleset support.
 - Admin provider management, endpoint policies, task-specific models, budgets, key revocation, configuration rollback, and production authentication.
-- Self-hosted pinned speech assets, optional WebGPU, NPC-specific voice playback, and tested browser compatibility.
+- Expanded browser narration controls and tested browser compatibility.
 
 The local HTTP cookie setup is for development. Public hosting requires HTTPS/secure cookies, deployment-managed secrets, persistent account authentication, and operational limits. Nothing has been published externally.
 
