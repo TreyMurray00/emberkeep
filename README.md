@@ -37,19 +37,19 @@ The UI proxies `/api` to FastAPI. All services are local-only by default. Use se
 ## Play the first adventure
 
 1. Create a table and name your character, or enter an existing invitation code.
-2. Reserve one of four randomly named, distinct class archetypes. Other players cannot reserve the same class.
-3. Pick a starter weapon, allocate 8 attribute points and 4 skill points, then mark ready.
+2. Reserve one of four procedurally generated, distinct class archetypes. Every table gets a stable random draw of class names, descriptions, resource spreads, and gear variants; other players cannot reserve the same class.
+3. Pick a starter weapon, prepare exactly two spells from the selected class spellbook, allocate 8 attribute points and 4 skill points, then mark ready.
 4. The host starts once all joined players are ready. One player can start alone. Configured AI providers generate and validate Chapter 1 of a new original five-chapter scenario at this point; template mode uses the built-in opening chapter.
 5. Explore each generated region and dungeon, investigate clues and traps, complete optional NPC side quests, and overcome an enemy before confronting the chapter boss. Three clues unlock a peaceful resolution; combat remains another path. Completing a chapter records its outcome and creates the next chapter from those consequences. Chapters 2–5 do not exist before the preceding chapter is complete.
-6. Earn generated quest and encounter rewards, then use or equip applicable items in your inventory. Resting and searching advance the threat clock; eight advances cause failure. State is persisted after each successful command.
+6. Earn generated quest and encounter rewards, then use or equip applicable items in your inventory. Equipped weapons add their listed damage and maximum-resource bonuses; only one weapon can be equipped at a time. Resting and searching advance the threat clock; eight advances cause failure. State is persisted after each successful command.
 
-Combat currently uses a small initiative rotation and immediate guardian retaliation. Movement grids, reactions, full spell lists, death saves, and tactical monster AI are not implemented. Buttons and the text-action box both resolve to the same six supported action types. Template mode recognizes simple phrases; a configured model can interpret broader wording within that action vocabulary.
+Combat uses a small initiative rotation and immediate enemy retaliation. Every class has four themed spells and two preparation slots. Damage and debuff spells target the active enemy; healing, wards, and damage buffs explicitly target the caster or a party member. Movement grids, reactions, death saves, and tactical monster AI are not implemented. Template mode recognizes simple phrases; a configured model can interpret broader wording within the supported action vocabulary.
 
 ## AI and browser speech
 
 The default template DM makes the game usable without API credentials. Administrator settings support a local llama.cpp-compatible server at `http://127.0.0.1:8080/v1` or OpenRouter's hosted chat-completions API. Enter the provider's model ID and test the connection. Hosted keys are encrypted with Fernet at rest and never returned by settings reads. A configuration version is selected when a session starts; settings changes apply to subsequently started sessions.
 
-At session start, a configured model proposes Chapter 1 of an original five-chapter scenario containing validated locations, an objective, a guide, clues, a dungeon trap, an enemy, a boss, optional NPC side quests, rewards, and multiple endings. When the party completes a chapter, the server records its resolution, side-quest results, pressure, party health, and rewards; only then does it request the next chapter with that history as authoritative context. Later chapters must preserve prior outcomes and turn at least one consequence into new content. Generated titles are checked for reuse and every chapter is schema-validated. If later generation fails, a consequence-aware deterministic chapter keeps the session playable.
+At session start, a configured model proposes Chapter 1 of an original five-chapter scenario containing validated locations, an objective, a guide, clues, a dungeon trap, an enemy, a boss, optional NPC side quests, rewards, and multiple endings. When the party completes a chapter, the server records its resolution, side-quest results, pressure, party health, and rewards; only then does it request the next chapter with that history as authoritative context. Later chapters must preserve prior outcomes and turn at least one consequence into new content. Generated titles are checked for reuse and every chapter is schema-validated. If generation fails, a deterministic chapter keeps the session playable and the game labels it as a fallback. The host can choose the built-in chapter while waiting; abandoned generation requests recover automatically after seven minutes.
 
 During play, the model rewrites confirmed outcome text; the server alone resolves mechanics. When AI narration is enabled, the internal confirmed-outcome text is not displayed as a second entry. The graph provides scoped visible context. Provider failure after a committed action falls back to the confirmed text without rerolling or undoing the action. Generated prose is untrusted and never directly changes mechanics, inventory, or quest state.
 
@@ -64,13 +64,20 @@ Session row locks serialize mutations. Expected versions reject stale commands, 
 ## Validation
 
 ```powershell
+docker compose -f compose.test.yaml up -d --wait
 ./.venv/Scripts/python.exe -m pytest -q
 cd web
 node node_modules/typescript/bin/tsc --noEmit
 node node_modules/vinext/dist/cli.js build
 ```
 
-Integration tests create/use a separate `emberkeep_test` database in the local container and delete the sessions/config versions they create. They do not modify the live `emberkeep` database. They cover capacity, class races, build validation, item idempotency, encrypted secrets, generated-scenario validation, playtest-content rejection, side-quest rewards, encounter progression, privacy, graph updates, and scenario endings. Browser interaction and audio quality testing are separate from these checks.
+Integration tests use the disposable PostgreSQL 17 service in `compose.test.yaml`, bound only to `127.0.0.1:55433`. The test harness never reads `DATABASE_URL` from `.env` and rejects non-local `TEST_DATABASE_URL` values, preventing accidental access to Neon or another remote database. Set `TEST_DATABASE_URL` only when intentionally using a different local PostgreSQL test instance. The suite covers capacity, class races, build validation, item idempotency, encrypted secrets, generated-scenario validation, playtest-content rejection, side-quest rewards, encounter progression, privacy, graph updates, and scenario endings. Browser interaction and audio quality testing are separate from these checks.
+
+Stop and discard the test database when finished:
+
+```powershell
+docker compose -f compose.test.yaml down
+```
 
 ## Next implementation milestones
 

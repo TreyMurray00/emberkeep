@@ -74,7 +74,7 @@ The web interface must be D&D-inspired: an adventurer's journal and tabletop cam
 - Main scene: a framed environment illustration or map above a parchment campaign journal. Distinguish DM narration, NPC speech, player actions, and mechanical results through speaker labels and consistent typography. Dice results appear as compact structured cards.
 - Party HUD: up to four portrait medallions with names, health, conditions, connection status, and an unmistakable active-turn marker. Responsive layouts wrap or collapse summaries without hiding the current player's essential resources.
 - Inventory: a satchel-themed panel with item slots or a compact list, category tabs, quantity badges, and visible equipment slots. Selecting an item opens its known description and labeled actions. All drag-and-drop operations also have button-based alternatives.
-- Action area: a clearly labeled action bar with familiar fantasy icons, resource costs, and a free-text action field. Disabled actions explain why they are unavailable. Keep primary controls in stable positions during narration and combat.
+- Action area: a clearly labeled action bar with familiar fantasy icons, resource costs, and a free-text action field. The spellbook exposes only the character's two prepared class spells and requires an explicit valid enemy, ally, or self target before casting. Disabled actions explain why they are unavailable. Keep primary controls in stable positions during narration and combat.
 - Voice controls: integrate a small speaker control into the journal header with status, subtitles, and accessible playback controls.
 - Motion: brief dice rolls, subtle turn highlights, and restrained resource-change effects. Respect reduced-motion settings; avoid constant particles, flashing damage effects, or animation that delays access to outcomes.
 - Accessibility: visible keyboard focus, semantic controls, adequate touch targets, scalable text, and verified WCAG AA contrast. Provide a low-texture presentation option that retains the fantasy palette and layout.
@@ -94,7 +94,7 @@ The party strip shows up to four character portraits/names, presence, turn statu
 
 ### Inventory and equipment
 
-Each collected item appears with its player-known name, icon or category, quantity, weight when relevant, and known description. Show equipment slots, equipped state, charges, and attunement only when supported by the ruleset. Hidden curses, unidentified properties, and secret item identities are excluded from client payloads.
+Each collected item appears with its player-known name, icon or category, quantity, mechanical bonuses, and known description. Starter weapons contribute their listed damage and maximum-resource bonuses while equipped, and only one weapon may be equipped at a time. Hidden curses, unidentified properties, and secret item identities are excluded from client payloads.
 
 Provide search and filters for weapons, armor, consumables, quest items, and miscellaneous items. Support inspect, equip/unequip, use, split stack, drop, and offer transfer through typed server commands. Show action costs and target requirements before submission. Collected-item notifications and inventory history derive from committed events.
 

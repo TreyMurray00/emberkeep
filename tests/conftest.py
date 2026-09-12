@@ -1,22 +1,18 @@
-"""Keep integration-test state separate from the live local playtest database."""
+"""Force integration tests onto a dedicated local PostgreSQL instance."""
 import os
-from pathlib import Path
 import psycopg
-from psycopg import sql
-from psycopg.conninfo import make_conninfo
 
-root=Path(__file__).resolve().parents[1]
-for line in (root/'.env').read_text().splitlines():
-    if '=' in line and not line.startswith('#'):
-        key,value=line.split('=',1)
-        value=value.strip()
-        if len(value)>=2 and value[0]==value[-1] and value[0] in ('"',"'"):
-            value=value[1:-1]
-        os.environ.setdefault(key,value)
+local_test_url='postgresql://emberkeep_test:emberkeep_test@127.0.0.1:55433/emberkeep_test'
+test_url=os.environ.get('TEST_DATABASE_URL',local_test_url)
+if '127.0.0.1' not in test_url and 'localhost' not in test_url:
+    raise RuntimeError('TEST_DATABASE_URL must point to a local PostgreSQL instance.')
+os.environ['DATABASE_URL']=test_url
 
-base=os.environ['DATABASE_URL']
-test_name='emberkeep_test'
-with psycopg.connect(base,autocommit=True) as connection:
-    if not connection.execute('SELECT 1 FROM pg_database WHERE datname=%s',(test_name,)).fetchone():
-        connection.execute(sql.SQL('CREATE DATABASE {}').format(sql.Identifier(test_name)))
-os.environ['DATABASE_URL']=make_conninfo(base,dbname=test_name)
+try:
+    with psycopg.connect(test_url,connect_timeout=3) as connection:
+        connection.execute('SELECT 1')
+except psycopg.OperationalError as exc:
+    raise RuntimeError(
+        'Local test PostgreSQL is unavailable. Start it with '
+        '`docker compose -f compose.test.yaml up -d --wait`.'
+    ) from exc

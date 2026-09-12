@@ -21,10 +21,11 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .domain import ATTRS, CHAPTER_COUNT, DEFAULT_SCENARIO, SKILLS, act, apply_scenario, finalize, log, new_world, side_quest_action, use_consumable, validate_build
+from .domain import ATTRS, CHAPTER_COUNT, DEFAULT_SCENARIO, SKILLS, act, apply_scenario, ensure_class_loadouts, finalize, log, new_world, side_quest_action, sync_equipment_stats, use_consumable, validate_build
 
 ROOT=Path(__file__).resolve().parents[1]
 logger=logging.getLogger(__name__)
+GENERATION_STALE_SECONDS=420
 if (ROOT/'.env').exists():
     for line in (ROOT/'.env').read_text().splitlines():
         if '=' in line and not line.startswith('#'):
@@ -34,8 +35,11 @@ if (ROOT/'.env').exists():
             os.environ.setdefault(k,v)
 
 def db():
+    database_url=os.environ['DATABASE_URL'].strip()
+    if len(database_url)>=2 and database_url[0]==database_url[-1] and database_url[0] in ('"',"'"):
+        database_url=database_url[1:-1]
     return psycopg.connect(
-        os.environ['DATABASE_URL'],
+        database_url,
         row_factory=dict_row,
         connect_timeout=int(os.environ.get('DB_CONNECT_TIMEOUT','10')),
         application_name='emberkeep',
@@ -95,6 +99,9 @@ def admin(request,c):
     if not row: raise HTTPException(401,'Administrator sign-in required.')
 
 def view(state,pid,sid):
+    # Player-visible class data must always include its selection-time spellbook,
+    # including sessions persisted by versions that predate prepared spells.
+    ensure_class_loadouts(state)
     own=state['members'][pid]
     result={**{k:v for k,v in state.items() if k not in ['members','commands','seed','scenario','side_quests','chapter_history']},'id':sid,'me':own,
         'members':[{k:v for k,v in m.items() if k not in ['draft','character']} | {'hp':m.get('character',{}).get('hp'), 'max_hp':m.get('character',{}).get('max_hp')} for m in state['members'].values()]}
@@ -172,6 +179,7 @@ def join(body:Join,request:Request,response:Response):
                 join_failures[host]=recent+[now]
                 raise HTTPException(404,'Session code not found.')
             w=row['state']
+            ensure_class_loadouts(w)
             if w['status']!='lobby': raise HTTPException(409,'This session is unavailable.')
         else:
             for _ in range(5):
@@ -181,7 +189,7 @@ def join(body:Join,request:Request,response:Response):
             else: raise HTTPException(503,'Could not allocate a session code. Try again.')
         if len(w['members'])>=4: raise HTTPException(409,'All four seats are occupied.')
         w['members'][pid]=dict(id=pid,name=name,host=not w['members'],ready=False,class_id=None,
-            draft=dict(class_id=None,gear='',attributes=dict.fromkeys(ATTRS,8),skills=dict.fromkeys(SKILLS,0)))
+            draft=dict(class_id=None,gear='',spells=[],attributes=dict.fromkeys(ATTRS,8),skills=dict.fromkeys(SKILLS,0)))
         c.execute('INSERT INTO identities VALUES (%s,%s,%s)',(digest(token),pid,sid))
         persist(c,sid,w,str(uuid.uuid4()),dict(type='joined',player=pid))
     response.set_cookie('player',token,httponly=True,secure=secure_cookies(),samesite='strict',max_age=60*60*24*30)
@@ -190,7 +198,10 @@ def join(body:Join,request:Request,response:Response):
 @app.get('/api/session')
 def session(request:Request):
     with db() as c:
-        who=identity(request,c); w=c.execute('SELECT state FROM sessions WHERE id=%s',(who['session_id'],)).fetchone()['state']
+        who=identity(request,c); w=c.execute('SELECT state FROM sessions WHERE id=%s FOR UPDATE',(who['session_id'],)).fetchone()['state']
+        recover_abandoned_generation(c,who['session_id'],who['player_id'],w)
+        if ensure_class_loadouts(w):
+            c.execute('UPDATE sessions SET state=%s WHERE id=%s',(Jsonb(w),who['session_id']))
         result=view(w,who['player_id'],who['session_id'])
         row=c.execute('SELECT config FROM ai_configs WHERE version=%s',(w.get('config_version'),)).fetchone() if w.get('config_version') else None
         cfg=(row or c.execute('SELECT config FROM ai_configs ORDER BY version DESC LIMIT 1').fetchone())['config']
@@ -314,9 +325,19 @@ def _generate_structured_scenario(cfg,key,prompt,avoid_titles=(),consequence_anc
             if cleaned.startswith('```'):
                 cleaned=cleaned.split('\n',1)[1] if '\n' in cleaned else cleaned[3:]
                 cleaned=cleaned.rsplit('```',1)[0].strip()
-            start,end=cleaned.find('{'),cleaned.rfind('}')
-            if start>=0 and end>start: cleaned=cleaned[start:end+1]
-            result=GeneratedScenario.model_validate(json.loads(cleaned)).model_dump()
+            parsed=None
+            decoder=json.JSONDecoder()
+            for index,char in enumerate(cleaned):
+                if char!='{': continue
+                try:
+                    candidate,_=decoder.raw_decode(cleaned[index:])
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(candidate,dict):
+                    parsed=candidate
+                    break
+            if parsed is None: raise ValueError('No JSON object in model response')
+            result=GeneratedScenario.model_validate(parsed).model_dump()
             content=json.dumps(result,ensure_ascii=False).casefold()
             forbidden=['ashen bell','emberkeep','sister elowen','cinder gate','whispering cloister','bell chamber','ruined monastery','silver tongue','hollow guardian','bell']
             if any(term in content for term in forbidden): raise ValueError('Generated scenario reused playtest content.')
@@ -347,6 +368,35 @@ Previously generated titles that must not be reused: {avoided}.
 Set prior_consequence to null. Make the side quests relevant to NPC goals and ensure their rewards fit their objectives. Keep every narrative field compact: one or two sentences and under 80 words. The title is the overall scenario title as well as the Chapter 1 title.
 Return only one JSON object matching the supplied schema exactly.'''
     return _generate_structured_scenario(cfg,key,prompt,avoid_titles)
+
+def fallback_scenario(seed, avoid_titles=()):
+    """Keep a session playable when an external generator is unavailable."""
+    scenario=copy.deepcopy(DEFAULT_SCENARIO)
+    scenario['title']=f"The Ashen Bell · {seed}"
+    scenario['prior_consequence']=None
+    while scenario['title'] in avoid_titles:
+        scenario['title']+=' · reprise'
+    return scenario
+
+def create_initial_scenario(request):
+    if request['cfg']['mode']=='template':
+        return copy.deepcopy(request['template']), 'template'
+    with db() as c:
+        avoid=[row['title'] for row in c.execute('SELECT title FROM generated_scenarios ORDER BY created_at DESC LIMIT 50').fetchall()]
+    try:
+        key=cipher().decrypt(request['encrypted_key'].encode()).decode() if request['encrypted_key'] else ''
+        for _ in range(2):
+            scenario=generate_scenario(request['cfg'],key,request['seed'],request['party_size'],avoid)
+            fingerprint=digest(json.dumps(scenario,sort_keys=True,ensure_ascii=False))
+            title_key=' '.join(scenario['title'].casefold().split())
+            with db() as c:
+                registered=c.execute('INSERT INTO generated_scenarios(fingerprint,title_key,title) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING RETURNING fingerprint',(fingerprint,title_key,scenario['title'])).fetchone()
+            if registered: return scenario, 'ai'
+            avoid.append(scenario['title'])
+        raise ValueError('The provider repeated a prior adventure.')
+    except Exception:
+        logger.exception('Initial adventure generation failed; using deterministic fallback.')
+        return fallback_scenario(request['seed'],avoid), 'fallback'
 
 def generate_chapter(cfg,key,seed,party_size,chapter_number,history):
     if not 2<=chapter_number<=CHAPTER_COUNT: raise ValueError('Invalid chapter number.')
@@ -434,18 +484,54 @@ def prepare_chapter_transition(c,world,resolution,ending):
     if not row: raise ValueError('The session AI configuration is no longer available.')
     world['status']='generating'
     world['pending_chapter']=next_number
+    world['generation_started_at']=time.time()
     return dict(number=next_number,history=copy.deepcopy(history),cfg=row['config'],encrypted_key=row['encrypted_key'],
         seed=world['seed'],party_size=len(world['members']))
 
 def create_pending_chapter(request):
     cfg=request['cfg']
-    if cfg.get('mode')=='template': return template_chapter(request['number'],request['history'])
+    if cfg.get('mode')=='template': return template_chapter(request['number'],request['history']), 'template'
     try:
         key=cipher().decrypt(request['encrypted_key'].encode()).decode() if request['encrypted_key'] else ''
-        return generate_chapter(cfg,key,request['seed'],request['party_size'],request['number'],request['history'])
+        return generate_chapter(cfg,key,request['seed'],request['party_size'],request['number'],request['history']), 'ai'
     except Exception:
         logger.exception('Chapter %s generation failed; using deterministic fallback.',request['number'])
-        return template_chapter(request['number'],request['history'])
+        return template_chapter(request['number'],request['history']), 'fallback'
+
+def finish_generation(c,sid,world,scenario,source,pid):
+    number=world['pending_chapter']
+    apply_scenario(world,scenario,number)
+    world['status']='active'
+    world['generation_source']=source
+    world.pop('pending_chapter',None)
+    world.pop('generation_started_at',None)
+    entry=log(world,'Dungeon Master',scenario['opening'],chapter=number)
+    persist(c,sid,world,'chapter:'+str(uuid.uuid4()),dict(type='chapter_generated',player=pid,entry=entry))
+
+def recover_abandoned_generation(c,sid,pid,world):
+    if world.get('status')!='generating': return
+    started=world.get('generation_started_at',0)
+    if time.time()-started < GENERATION_STALE_SECONDS: return
+    number=world.get('pending_chapter',1)
+    logger.warning('Recovering abandoned generation for session %s chapter %s',sid,number)
+    if number==1:
+        scenario=fallback_scenario(world['seed'])
+    else:
+        scenario=template_chapter(number,world['chapter_history'])
+    finish_generation(c,sid,world,scenario,'fallback',pid)
+
+@app.post('/api/generation/fallback')
+def use_generation_fallback(request:Request):
+    with db() as c:
+        who=identity(request,c); sid=who['session_id']; pid=who['player_id']
+        world=c.execute('SELECT state FROM sessions WHERE id=%s FOR UPDATE',(sid,)).fetchone()['state']
+        if world.get('status')!='generating': return view(world,pid,sid)
+        if not world['members'][pid]['host']:
+            raise HTTPException(403,'Only the host can choose the built-in chapter.')
+        number=world['pending_chapter']
+        scenario=fallback_scenario(world['seed']) if number==1 else template_chapter(number,world['chapter_history'])
+        finish_generation(c,sid,world,scenario,'fallback',pid)
+        return view(world,pid,sid)
 
 @app.post('/api/command')
 def command(body:Command,request:Request):
@@ -453,6 +539,7 @@ def command(body:Command,request:Request):
     with db() as c:
         who=identity(request,c); sid=who['session_id']; pid=who['player_id']
         w=c.execute('SELECT state FROM sessions WHERE id=%s FOR UPDATE',(sid,)).fetchone()['state']
+        ensure_class_loadouts(w)
         existing=c.execute('SELECT payload FROM events WHERE session_id=%s AND command_id=%s',(sid,body.id)).fetchone()
         if existing:
             if existing['payload'].get('player')!=pid: raise HTTPException(409,'Command ID already used.')
@@ -466,9 +553,9 @@ def command(body:Command,request:Request):
                     cls=data.get('class_id')
                     if cls not in [cl['id'] for cl in w['classes']]: raise ValueError('Unknown class.')
                     if any(x['class_id']==cls and x['id']!=pid for x in w['members'].values()): raise ValueError('Another player has reserved this class.')
-                    m['class_id']=cls; m['draft']['class_id']=cls; m['draft']['gear']=''
+                    m['class_id']=cls; m['draft']['class_id']=cls; m['draft']['gear']='';m['draft']['spells']=[]
                 elif body.type=='draft':
-                    allowed={'attributes','skills','gear'}
+                    allowed={'attributes','skills','gear','spells'}
                     draft={**m['draft'],**{k:v for k,v in data.items() if k in allowed}}
                     validate_build(draft); m['draft']=draft
                 else:
@@ -480,27 +567,19 @@ def command(body:Command,request:Request):
                 w['config_version']=cfgrow['version']
                 w['ai_enabled']=cfgrow['config']['mode']!='template'
                 if cfgrow['config']['mode']!='template':
-                    key=cipher().decrypt(cfgrow['encrypted_key'].encode()).decode() if cfgrow['encrypted_key'] else ''
-                    try:
-                        avoid=[row['title'] for row in c.execute('SELECT title FROM generated_scenarios ORDER BY created_at DESC LIMIT 50').fetchall()]
-                        for _ in range(2):
-                            scenario=generate_scenario(cfgrow['config'],key,w['seed'],len(w['members']),avoid)
-                            fingerprint=digest(json.dumps(scenario,sort_keys=True,ensure_ascii=False))
-                            title_key=' '.join(scenario['title'].casefold().split())
-                            registered=c.execute('INSERT INTO generated_scenarios(fingerprint,title_key,title) VALUES (%s,%s,%s) ON CONFLICT DO NOTHING RETURNING fingerprint',(fingerprint,title_key,scenario['title'])).fetchone()
-                            if registered:
-                                apply_scenario(w,scenario,1); break
-                            avoid.append(scenario['title'])
-                        else: raise ValueError('The provider repeated a prior adventure.')
-                    except Exception:
-                        logger.exception('Initial adventure generation failed.')
-                        raise HTTPException(502,'Adventure generation failed. The model may be busy or may not have returned valid structured data. Your party is still in the lobby; try again.') from None
-                else: apply_scenario(w,w['scenario'],1)
-                w['status']='active'
-                log(w,'Dungeon Master',w['scenario']['opening'])
+                    w['status']='generating'
+                    w['pending_chapter']=1
+                    w['generation_started_at']=time.time()
+                    generation_request=dict(number=1,cfg=cfgrow['config'],encrypted_key=cfgrow['encrypted_key'],
+                        seed=w['seed'],party_size=len(w['members']),template=copy.deepcopy(w['scenario']))
+                else:
+                    apply_scenario(w,w['scenario'],1)
+                    w['generation_source']='template'
+                    w['status']='active'
+                    log(w,'Dungeon Master',w['scenario']['opening'])
             elif body.type=='action':
                 if not m['ready']: raise ValueError('Finish your character first.')
-                text,roll=act(w,pid,data.get('action'))
+                text,roll=act(w,pid,data.get('action'),spell_id=data.get('spell_id'),target_id=data.get('target_id'))
                 entry=log(w,'Dungeon Master',text,roll=roll); payload['entry']=entry
                 if w['status']=='complete':
                     resolution='a peaceful resolution' if data.get('action')=='negotiate' else 'victory in combat'
@@ -523,22 +602,26 @@ def command(body:Command,request:Request):
                         log(w,'Chronicle',use_consumable(w,pid,item['id']))
                     else:
                         if item['kind']!='weapon': raise ValueError('Only weapons can be equipped in this rules slice.')
-                        item['equipped']=not item['equipped']
+                        equipping=not item['equipped']
+                        for owned in char['inventory']:
+                            if owned['kind']=='weapon': owned['equipped']=False
+                        item['equipped']=equipping
+                        sync_equipment_stats(char)
             else: raise ValueError('Unknown command.')
         except (ValueError,KeyError,TypeError) as e:
             raise HTTPException(422,str(e) if isinstance(e,ValueError) else 'Invalid command data.')
         persist(c,sid,w,body.id,payload)
         result=view(w,pid,sid)
     if not generation_request: return result
-    next_chapter=create_pending_chapter(generation_request)
+    if generation_request['number']==1:
+        next_chapter,source=create_initial_scenario(generation_request)
+    else:
+        next_chapter,source=create_pending_chapter(generation_request)
     with db() as c:
         latest=c.execute('SELECT state FROM sessions WHERE id=%s FOR UPDATE',(sid,)).fetchone()['state']
         if latest.get('status')!='generating' or latest.get('pending_chapter')!=generation_request['number']:
             return view(latest,pid,sid)
-        apply_scenario(latest,next_chapter,generation_request['number'])
-        latest['status']='active'; latest.pop('pending_chapter',None)
-        entry=log(latest,'Dungeon Master',next_chapter['opening'],chapter=latest['chapter'])
-        persist(c,sid,latest,'chapter:'+str(uuid.uuid4()),dict(type='chapter_generated',player=pid,entry=entry))
+        finish_generation(c,sid,latest,next_chapter,source,pid)
         return view(latest,pid,sid)
 
 class Login(BaseModel): password:str=Field(max_length=256)
@@ -619,8 +702,32 @@ def model_call(cfg,key,prompt,instruction=None,max_tokens=None,result_limit=4000
         if cfg['mode']=='openrouter': payload['provider']={'require_parameters':True}
     with httpx.Client(timeout=timeout,follow_redirects=False,trust_env=False) as client:
         r=client.post(url,headers=headers,json=payload)
+        try:
+            response_data=r.json()
+            response_body=json.dumps(response_data,ensure_ascii=False)
+        except Exception:
+            response_data={}
+            response_body=getattr(r,'text','<response body unavailable>')
+        if cfg['mode']=='openrouter':
+            logger.warning('OpenRouter API response model=%s status=%s body=%s',cfg.get('model',''),r.status_code,response_body[:12000])
+        # Some OpenRouter models (including Nemotron 3 Ultra free) do not
+        # implement response_format. Retry once with prompt-enforced JSON so
+        # those models can still be used with the server-side validator.
+        if r.status_code==400 and json_mode and cfg['mode']=='openrouter' and 'response_format' in payload:
+            fallback_payload={key:value for key,value in payload.items() if key not in ('response_format','plugins','provider')}
+            r=client.post(url,headers=headers,json=fallback_payload)
+            try:
+                response_data=r.json()
+                response_body=json.dumps(response_data,ensure_ascii=False)
+            except Exception:
+                response_data={}
+                response_body=getattr(r,'text','<response body unavailable>')
+            logger.warning('OpenRouter API fallback response model=%s status=%s body=%s',cfg.get('model',''),r.status_code,response_body[:12000])
         r.raise_for_status()
-        result=r.json()['choices'][0]['message']['content']
+        message=response_data.get('choices',[{}])[0].get('message',{})
+        result=message.get('content')
+        if isinstance(result,list):
+            result=''.join(part.get('text','') for part in result if isinstance(part,dict))
         if not isinstance(result,str) or not result.strip(): raise ValueError('Empty narration')
         return result[:result_limit]
 
@@ -630,7 +737,7 @@ def safe_narration(candidate,fallback):
     markers=(
         "here's a thinking process",'analyze user input','identify constraints',
         'draft - attempt','check constraints','chain of thought','<think>','</think>',
-        'analysis:','reasoning:',
+        'analysis:','reasoning:','user safety:','safety categories:',
     )
     lowered=text.casefold()
     if not text or len(text.split())>100 or any(marker in lowered for marker in markers): return fallback

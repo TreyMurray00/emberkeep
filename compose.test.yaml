@@ -1,0 +1,17 @@
+name: emberkeep-test
+services:
+  db:
+    image: postgres:17
+    ports:
+      - "127.0.0.1:55433:5432"
+    environment:
+      POSTGRES_DB: emberkeep_test
+      POSTGRES_USER: emberkeep_test
+      POSTGRES_PASSWORD: emberkeep_test
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U emberkeep_test -d emberkeep_test"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    tmpfs:
+      - /var/lib/postgresql/data

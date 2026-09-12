@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
 import {
   Shield,
   Sparkles,
@@ -32,19 +33,27 @@ import {
   CollapsibleTrigger,
 } from '@/components/ui/collapsible';
 import { Input } from '@/components/ui/input';
+import { Checkbox } from '@/components/ui/checkbox';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs';
 import { Progress } from '@/components/ui/progress';
 import { Voice } from '@/components/voice';
 import { LeaveTable } from '@/components/leave-table';
-import { api, type World, type Draft } from '@/lib/game';
+import { api, isSafetyMessage, type World, type Draft } from '@/lib/game';
 const icons: Record<string, typeof Shield> = {
   warden: Shield,
   mage: Sparkles,
   ranger: BowArrow,
   bard: Music2,
 };
-const steps = ['Calling', 'Equipment', 'Attributes', 'Skills', 'Review'];
+const steps = ['Calling', 'Equipment', 'Spells', 'Attributes', 'Skills', 'Review'];
 export default function Home() {
   const [world, setWorld] = useState<World | null>(null),
     [loading, setLoading] = useState(true),
@@ -57,11 +66,15 @@ export default function Home() {
     [query, setQuery] = useState('');
   const [intent, setIntent] = useState('');
   const [sideQuestsOpen, setSideQuestsOpen] = useState(true);
+  const [spellOpen, setSpellOpen] = useState(false),
+    [selectedSpellId, setSelectedSpellId] = useState(''),
+    [spellTarget, setSpellTarget] = useState('');
   const narrated = useRef(new Set<string>());
   async function refresh() {
     try {
       const w = await api('/session');
       setWorld(w);
+      setDraft((current) => current ?? w.me.draft);
       return w;
     } catch (e) {
       if ((e as Error).message !== 'Join a session first.')
@@ -71,25 +84,25 @@ export default function Home() {
     }
   }
   useEffect(() => {
-    refresh();
+    const timer = setTimeout(() => void refresh(), 0);
+    return () => clearTimeout(timer);
   }, []);
+  const worldId = world?.id;
   useEffect(() => {
-    if (!world) return;
+    if (!worldId) return;
     const timer = setInterval(refresh, 2500);
     return () => clearInterval(timer);
-  }, [world?.id]);
+  }, [worldId]);
+  const latestJournalEntry = world?.journal.at(-1);
   useEffect(() => {
-    if (world && !draft) setDraft(world.me.draft);
-  }, [world, draft]);
-  useEffect(() => {
-    const e = world?.journal.at(-1);
+    const e = latestJournalEntry;
     if (e && !e.prose && !narrated.current.has(e.id)) {
       narrated.current.add(e.id);
       void api('/narrate/' + e.id, {})
         .then(() => refresh())
         .catch(() => {});
     }
-  }, [world?.journal.at(-1)?.id]);
+  }, [latestJournalEntry]);
   useEffect(() => {
     const context = (
       document as Document & {
@@ -128,6 +141,11 @@ export default function Home() {
       const proposal = await api<{ action: string }>('/interpret', {
         text: intent,
       });
+      if (proposal.action === 'spell') {
+        openSpellbook();
+        setIntent('');
+        return;
+      }
       if (await command('action', { action: proposal.action })) setIntent('');
     } catch (e) {
       setError((e as Error).message);
@@ -177,7 +195,22 @@ export default function Home() {
   }
   const cls = world?.classes.find((c) => c.id === world.me.class_id),
     Icon = icons[cls?.id || 'warden'],
-    character = world?.me.character;
+    character = world?.me.character,
+    selectedGear = cls?.gear.find((g) => g.id === draft?.gear);
+  const preparedSpells=(cls?.spells || []).filter((spell) => (character?.spells || []).includes(spell.id)),
+    selectedSpell=preparedSpells.find((spell) => spell.id===selectedSpellId);
+  function openSpellbook() {
+    const first=preparedSpells[0];
+    if (!first) return;
+    setSelectedSpellId(first.id);
+    setSpellTarget(first.target==='enemy' ? 'enemy' : world?.me.id || '');
+    setSpellOpen(true);
+  }
+  function chooseCombatSpell(id:string) {
+    const spell=preparedSpells.find((entry) => entry.id===id);
+    setSelectedSpellId(id);
+    setSpellTarget(spell?.target==='enemy' ? 'enemy' : world?.me.id || '');
+  }
   const arcana = character?.skills.Arcana ?? 0,
     athletics = character?.skills.Athletics ?? 0,
     actionOptions = [
@@ -204,10 +237,10 @@ export default function Home() {
       },
       {
         id: 'spell',
-        label: 'Cast spell',
+        label: 'Open spellbook',
         icon: Sparkles,
-        roll: 'D20 6+',
-        bonus: `Arcana +${arcana} damage`,
+        roll: 'Choose spell + target',
+        bonus: `Arcana +${arcana} powers spells`,
       },
       {
         id: 'negotiate',
@@ -227,18 +260,18 @@ export default function Home() {
   return (
     <div className="shell">
       <header className="masthead">
-        <a className="brand" href="/">
+        <Link className="brand" href="/">
           <Flame />
           <span>
             EMBERKEEP<small>A TABLETOP CHRONICLE</small>
           </span>
-        </a>
+        </Link>
         <nav>
           <span className="edition">PROCEDURAL CHRONICLES</span>
-          <a href="/admin/ai">
+          <Link href="/admin/ai">
             <Settings size={19} />
             <span>Keeper’s settings</span>
-          </a>
+          </Link>
         </nav>
       </header>
       <main>
@@ -287,7 +320,7 @@ export default function Home() {
               <form
                 onSubmit={(e) => {
                   e.preventDefault();
-                  join();
+                  void join();
                 }}
               >
                 <label>
@@ -514,7 +547,7 @@ export default function Home() {
                             <span>
                               {g.name}
                               <small>
-                                Starting weapon · equipped on arrival
+                                Starting weapon · {g.effect || 'equipment bonus'}
                               </small>
                             </span>
                             <RadioGroupItem value={g.id} />
@@ -526,11 +559,56 @@ export default function Home() {
                         <p>2 × Healing draught · 1 × Adventurer’s pack</p>
                       </div>
                     </>
-                  ) : step === 2 || step === 3 ? (
+                  ) : step === 2 ? (
+                    <>
+                      <div className="subheading">
+                        <h2>Prepare two spells.</h2>
+                        <p>
+                          Fill both spell slots from your calling’s spellbook.
+                          You cannot change prepared spells after marking ready.
+                        </p>
+                      </div>
+                      <div className="spell-slots" aria-live="polite">
+                        <span>Spell slot I</span>
+                        <strong>
+                          {cls?.spells?.find((spell) => spell.id === (draft.spells || [])[0])?.name || 'Empty'}
+                        </strong>
+                        <span>Spell slot II</span>
+                        <strong>
+                          {cls?.spells?.find((spell) => spell.id === (draft.spells || [])[1])?.name || 'Empty'}
+                        </strong>
+                      </div>
+                      <div className="spell-grid">
+                        {cls?.spells?.map((spell) => {
+                          const selected=(draft.spells || []).includes(spell.id),
+                            full=(draft.spells || []).length>=2;
+                          return (
+                            <label className={'spell-card '+(selected ? 'selected' : '')} key={spell.id}>
+                              <div>
+                                <span className="eyebrow">{spell.kind} · {spell.cost} mana</span>
+                                <Checkbox
+                                  checked={selected}
+                                  disabled={!selected && full}
+                                  onCheckedChange={() => {
+                                    const spells=draft.spells || [];
+                                    setDraft({...draft,spells:selected ? spells.filter((id) => id!==spell.id) : [...spells,spell.id]});
+                                  }}
+                                  aria-label={`Prepare ${spell.name}`}
+                                />
+                              </div>
+                              <h3>{spell.name}</h3>
+                              <p>{spell.description}</p>
+                              <small>{spell.target==='enemy' ? 'Targets the active enemy' : 'Targets self or an ally'} · Power {spell.power}</small>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </>
+                  ) : step === 3 || step === 4 ? (
                     <PointEditor
                       draft={draft}
                       setDraft={setDraft}
-                      skills={step === 3}
+                      skills={step === 4}
                     />
                   ) : (
                     <div className="review">
@@ -568,6 +646,13 @@ export default function Home() {
                         Starter weapon:{' '}
                         <strong>
                           {cls?.gear.find((g) => g.id === draft.gear)?.name}
+                          {selectedGear ? ` · ${selectedGear.effect}` : ''}
+                        </strong>
+                      </p>
+                      <p>
+                        Prepared spells:{' '}
+                        <strong>
+                          {(draft.spells || []).map((id) => cls?.spells?.find((spell) => spell.id===id)?.name).filter(Boolean).join(' · ')}
                         </strong>
                       </p>
                     </div>
@@ -581,10 +666,10 @@ export default function Home() {
                       Back
                     </Button>
                     <span>Saved when you continue</span>
-                    {step < 4 ? (
+                    {step < 5 ? (
                       <Button
                         className="primary"
-                        disabled={busy || !cls || (step === 1 && !draft.gear)}
+                        disabled={busy || !cls || (step === 1 && !draft.gear) || (step === 2 && (draft.spells || []).length !== 2)}
                         onClick={next}
                       >
                         Continue
@@ -614,20 +699,20 @@ export default function Home() {
                     <>
                       <Meter
                         label="HP"
-                        value={cls.hp + draft.attributes.Might - 8}
-                        max={cls.hp + draft.attributes.Might - 8}
+                        value={cls.hp + draft.attributes.Might - 8 + (selectedGear?.resource === 'hp' ? selectedGear.resource_bonus : 0)}
+                        max={cls.hp + draft.attributes.Might - 8 + (selectedGear?.resource === 'hp' ? selectedGear.resource_bonus : 0)}
                         color="hp"
                       />
                       <Meter
                         label="Mana"
-                        value={cls.mana + draft.attributes.Intellect - 8}
-                        max={cls.mana + draft.attributes.Intellect - 8}
+                        value={cls.mana + draft.attributes.Intellect - 8 + (selectedGear?.resource === 'mana' ? selectedGear.resource_bonus : 0)}
+                        max={cls.mana + draft.attributes.Intellect - 8 + (selectedGear?.resource === 'mana' ? selectedGear.resource_bonus : 0)}
                         color="mana"
                       />
                       <Meter
                         label="Stamina"
-                        value={cls.stamina + draft.attributes.Agility - 8}
-                        max={cls.stamina + draft.attributes.Agility - 8}
+                        value={cls.stamina + draft.attributes.Agility - 8 + (selectedGear?.resource === 'stamina' ? selectedGear.resource_bonus : 0)}
+                        max={cls.stamina + draft.attributes.Agility - 8 + (selectedGear?.resource === 'stamina' ? selectedGear.resource_bonus : 0)}
                         color="stamina"
                       />
                     </>
@@ -676,6 +761,37 @@ export default function Home() {
                   {world.members.length} adventurers ready
                 </p>
               </section>
+            ) : world.status === 'generating' ? (
+              <section className="folio waiting chapter-generating" aria-live="polite">
+                <Sparkles size={48} />
+                <p className="eyebrow">THE NEXT CHAPTER IS BEING WRITTEN</p>
+                <h1>Turning the page…</h1>
+                <p>
+                  The dungeon master is shaping Chapter {world.pending_chapter ?? world.chapter + 1}.
+                  Your completed outcome is safe, and the table will resume as
+                  soon as the new chapter is ready.
+                </p>
+                {world.me.host && (
+                  <Button
+                    variant="outline"
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true);
+                      setError('');
+                      try { setWorld(await api('/generation/fallback', {})); }
+                      catch (e) { setError((e as Error).message); }
+                      finally { setBusy(false); }
+                    }}
+                  >
+                    Continue with built-in chapter
+                  </Button>
+                )}
+                <div className="chapter-loader" aria-label="Generating next chapter">
+                  <span />
+                  <span />
+                  <span />
+                </div>
+              </section>
             ) : (
               <div className="play-layout">
                 <section className="adventure">
@@ -687,9 +803,19 @@ export default function Home() {
                       Chapter {world.chapter} of {world.chapter_count} ·{' '}
                       {world.chapter_title}
                     </p>
+                    {world.generation_source === 'fallback' && (
+                      <output>AI generation did not complete for this chapter. You are playing the built-in story.</output>
+                    )}
                     <h1>{world.location}</h1>
                     <p>{world.objective}</p>
                     <div className="scene-meta">
+                      {character && (
+                        <span className="mobile-vitals" aria-label="Your current resources">
+                          <Heart size={16} /> {character.hp} HP
+                          <Droplets size={16} /> {character.mana} mana
+                          <Zap size={16} /> {character.stamina} stamina
+                        </span>
+                      )}
                       <span>
                         <Gem size={16} />
                         {world.clues}/3 clues
@@ -701,8 +827,13 @@ export default function Home() {
                       {world.enemy_hp > 0 && (
                         <span>
                           <Swords size={16} />
-                          {world.enemy_name || 'Enemy'} · {world.enemy_hp} HP
+                          {world.enemy_name || 'Enemy'} · {world.enemy_hp}/
+                          {world.enemy_max_hp || world.enemy_hp} HP · scaled for{' '}
+                          {world.encounter_party_size || world.members.length}
                         </span>
+                      )}
+                      {!!world.enemy_effects?.weaken && (
+                        <span><Sparkles size={16} />Weakened · −{world.enemy_effects.weaken} next retaliation</span>
                       )}
                     </div>
                   </div>
@@ -726,6 +857,7 @@ export default function Home() {
                       aria-relevant="additions text"
                     >
                       {world.journal
+                        .filter((e) => !isSafetyMessage(e.text) && !isSafetyMessage(e.prose))
                         .slice()
                         .reverse()
                         .map((e, index) => {
@@ -870,10 +1002,8 @@ export default function Home() {
                               <Button
                                 variant="outline"
                                 key={action.id}
-                                disabled={busy}
-                                onClick={() =>
-                                  command('action', { action: action.id })
-                                }
+                                disabled={busy || (action.id==='spell' && preparedSpells.length===0)}
+                                onClick={() => action.id==='spell' ? openSpellbook() : command('action', { action: action.id })}
                               >
                                 <ActionIcon size={17} />
                                 <span className="action-copy">
@@ -885,11 +1015,68 @@ export default function Home() {
                             );
                           })}
                         </div>
+                        {spellOpen && selectedSpell && (
+                          <section className="spell-caster" aria-label="Cast a prepared spell">
+                            <div className="spell-caster-head">
+                              <div>
+                                <p className="eyebrow">PREPARED SPELL</p>
+                                <strong>{selectedSpell.description}</strong>
+                              </div>
+                              <Button variant="ghost" onClick={() => setSpellOpen(false)}>Close</Button>
+                            </div>
+                            <div className="spell-caster-fields">
+                              <label>
+                                Spell
+                                <Select value={selectedSpellId} onValueChange={(value) => chooseCombatSpell(String(value))}>
+                                  <SelectTrigger><SelectValue /></SelectTrigger>
+                                  <SelectContent>
+                                    {preparedSpells.map((spell) => (
+                                      <SelectItem key={spell.id} value={spell.id}>{spell.name} · {spell.cost} mana</SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
+                              </label>
+                              {selectedSpell.target==='enemy' ? (
+                                <div className="spell-target-summary">
+                                  <span>Target</span>
+                                  <strong>{world.enemy_name || 'No active enemy'}</strong>
+                                </div>
+                              ) : (
+                                <label>
+                                  Target
+                                  <Select value={spellTarget} onValueChange={(value) => setSpellTarget(String(value))}>
+                                    <SelectTrigger><SelectValue /></SelectTrigger>
+                                    <SelectContent>
+                                      {world.members.filter((member) => member.ready).map((member) => (
+                                        <SelectItem key={member.id} value={member.id}>
+                                          {member.id===world.me.id ? `${member.name} · self` : member.name}
+                                        </SelectItem>
+                                      ))}
+                                    </SelectContent>
+                                  </Select>
+                                </label>
+                              )}
+                            </div>
+                            <div className="spell-caster-footer">
+                              <span>{selectedSpell.kind} · power {selectedSpell.power} · {selectedSpell.cost} mana</span>
+                              <Button
+                                className="primary"
+                                disabled={busy || character!.mana<selectedSpell.cost || (selectedSpell.target==='enemy' && !world.enemy_hp) || (selectedSpell.target!=='enemy' && !spellTarget)}
+                                onClick={async () => {
+                                  const result=await command('action',{action:'spell',spell_id:selectedSpell.id,target_id:spellTarget});
+                                  if (result) setSpellOpen(false);
+                                }}
+                              >
+                                <Sparkles size={16} /> Cast {selectedSpell.name}
+                              </Button>
+                            </div>
+                          </section>
+                        )}
                         <form
                           className="intent-form"
                           onSubmit={(e) => {
                             e.preventDefault();
-                            describe();
+                             void describe();
                           }}
                         >
                           <Input
@@ -909,7 +1096,7 @@ export default function Home() {
                           </Button>
                         </form>
                         <small className="action-costs">
-                          Attack: 2 stamina · Spell: 3 mana · Combat consumable:
+                          Attack: 2 stamina · Spells: listed mana cost · Combat consumable:
                           1 turn · Rest: 2 threat
                         </small>
                         {character && (
@@ -920,6 +1107,11 @@ export default function Home() {
                             Intellect +{character.attributes.Intellect - 8}{' '}
                             mana. Attributes do not modify d20 checks in the
                             current rules.
+                            {' '}Equipped gear adds +
+                            {character.inventory
+                              .filter((item) => item.equipped)
+                              .reduce((total, item) => total + (item.damage_bonus || 0), 0)}{' '}
+                            damage.
                           </small>
                         )}
                       </div>
@@ -1007,6 +1199,14 @@ export default function Home() {
                                       {i.equipped ? 'Equipped' : i.kind} · ×
                                       {i.quantity}
                                     </small>
+                                    {i.kind === 'weapon' && (
+                                      <small className="item-effect">
+                                        +{i.damage_bonus || 0} damage
+                                        {i.resource_bonus
+                                          ? ` · +${i.resource_bonus} max ${i.resource}`
+                                          : ''}
+                                      </small>
+                                    )}
                                     {i.kind === 'potion' ||
                                     i.kind === 'weapon' ? (
                                       <Button
@@ -1068,6 +1268,31 @@ export default function Home() {
                             <p className="stat-line" key={k}>
                               {k}
                               <strong>{v}</strong>
+                            </p>
+                          ))}
+                          <div className="rule" />
+                          <p className="eyebrow">PREPARED SPELLS</p>
+                          {preparedSpells.map((spell) => (
+                            <p className="spell-sheet-entry" key={spell.id}>
+                              <strong>{spell.name}</strong>
+                              <span>{spell.kind} · {spell.cost} mana · {spell.description}</span>
+                            </p>
+                          ))}
+                          {!!character.effects?.damage && (
+                            <p className="active-effect">Empowered · +{character.effects.damage} next damage</p>
+                          )}
+                          {!!character.effects?.ward && (
+                            <p className="active-effect">Warded · prevent {character.effects.ward} from the next hit</p>
+                          )}
+                          <div className="rule" />
+                          <p className="eyebrow">EQUIPPED BONUSES</p>
+                          {character.inventory.filter((item) => item.equipped).map((item) => (
+                            <p className="stat-line" key={item.id}>
+                              {item.name}
+                              <strong>
+                                +{item.damage_bonus || 0} damage
+                                {item.resource_bonus ? ` · +${item.resource_bonus} ${item.resource}` : ''}
+                              </strong>
                             </p>
                           ))}
                         </TabsContent>

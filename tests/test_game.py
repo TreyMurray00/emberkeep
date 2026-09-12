@@ -4,7 +4,7 @@ import uuid
 import pytest
 from fastapi.testclient import TestClient
 from server.app import app,db
-from server.domain import DEFAULT_SCENARIO,new_world,finalize,inventory_item,use_consumable,validate_build,act
+from server.domain import DEFAULT_SCENARIO,cast_spell,encounter_health,ensure_spellbooks,equipment_damage_bonus,new_world,finalize,inventory_item,use_consumable,validate_build,act
 
 def generated_fixture(seed='fixed'):
     return {
@@ -21,6 +21,15 @@ def generated_fixture(seed='fixed'):
         'peaceful_ending':'You speak the Heartroot phrase and the Grafter releases the seed willingly, ending the unnatural winter without bloodshed.',
         'failure_ending':'The winter roots reach Briarwatch and seal the orchard beneath permanent ice.',
     }
+
+@pytest.fixture
+def ai_generation():
+    from psycopg.types.json import Jsonb
+    with db() as c:
+        version=c.execute('INSERT INTO ai_configs(config) VALUES (%s) RETURNING version',
+            (Jsonb(dict(mode='local',model='test',temperature=.7,max_tokens=300)),)).fetchone()['version']
+    yield
+    with db() as c:c.execute('DELETE FROM ai_configs WHERE version=%s',(version,))
 
 @pytest.fixture
 def players(monkeypatch):
@@ -45,8 +54,8 @@ def send(c,type,data=None,id=None,version=None):
 
 def build(c,cls,command_id=None):
     assert send(c,'reserve',{'class_id':cls}).status_code==200
-    w=c.get('/api/session').json();gear=next(x for x in w['classes'] if x['id']==cls)['gear'][0]['id']
-    draft=dict(gear=gear,attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+    w=c.get('/api/session').json();chosen=next(x for x in w['classes'] if x['id']==cls);gear=chosen['gear'][0]['id']
+    draft=dict(gear=gear,spells=[spell['id'] for spell in chosen['spells'][:2]],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
     assert send(c,'draft',draft).status_code==200
     return send(c,'finalize',id=command_id)
 
@@ -127,7 +136,7 @@ def test_inventory_consumption_atomic_retry(players):
 def test_consumables_restore_each_character_resource(resource,starting):
     class FixedDice:
         def randint(self,a,b):return 1
-    w=new_world(7);draft=dict(class_id='warden',gear='sword',attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+    w=new_world(7);draft=dict(class_id='warden',gear='sword',spells=[spell['id'] for spell in next(c for c in w['classes'] if c['id']=='warden')['spells'][:2]],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
     char=finalize(draft,w['classes']);char[resource]=starting
     potion=inventory_item('resource-tonic','Resource tonic','potion',restores=resource,restore_amount=6)
     char['inventory'].append(potion);w['members']['a']=dict(id='a',name='A',ready=True,character=char)
@@ -143,7 +152,7 @@ def test_combat_consumable_advances_to_next_player():
         def randint(self,a,b):return 1
     w=new_world(8)
     for pid,cls in [('a','warden'),('b','mage')]:
-        draft=dict(class_id=cls,gear=dict(warden='sword',mage='staff')[cls],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+        draft=dict(class_id=cls,gear=dict(warden='sword',mage='staff')[cls],spells=[spell['id'] for spell in next(c for c in w['classes'] if c['id']==cls)['spells'][:2]],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
         w['members'][pid]=dict(id=pid,name=pid.upper(),ready=True,character=finalize(draft,w['classes']))
     char=w['members']['a']['character'];char['mana']=0
     potion=inventory_item('mana-tonic','Mana tonic','potion',restores='mana',restore_amount=5);char['inventory'].append(potion)
@@ -156,7 +165,7 @@ def test_new_encounters_skip_unconscious_players():
     from server.domain import side_quest_action
     w=new_world(9)
     for pid,cls,gear in [('a','warden','sword'),('b','mage','staff')]:
-        draft=dict(class_id=cls,gear=gear,attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+        draft=dict(class_id=cls,gear=gear,spells=[spell['id'] for spell in next(c for c in w['classes'] if c['id']==cls)['spells'][:2]],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
         w['members'][pid]=dict(id=pid,name=pid.upper(),ready=True,character=finalize(draft,w['classes']))
     w['members']['a']['character']['hp']=0;w['status']='active';w['stage']=3
     act(w,'b','explore')
@@ -166,16 +175,98 @@ def test_new_encounters_skip_unconscious_players():
     side_quest_action(w,'b','quest')
     assert w['enemy_kind']=='side_quest' and w['turn']==1
 
+def test_encounters_scale_with_total_party_members():
+    expected={'side_quest':(9,18),'enemy':(12,24),'legacy':(18,36),'boss':(23,44)}
+    for kind,(solo_hp,four_player_hp) in expected.items():
+        assert encounter_health(kind,1)==solo_hp
+        assert encounter_health(kind,4)==four_player_hp
+        assert four_player_hp>solo_hp
+
 def test_world_generation_and_endings():
+    signatures=[]
     for seed in range(20):
         w=new_world(seed);assert len({c['id'] for c in w['classes']})==4
         assert w['classes']==new_world(seed)['classes']
-    w=new_world(1);draft=dict(class_id='warden',gear='sword',attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+        signatures.append(tuple((c['name'],c['hp'],c['mana'],c['stamina'],tuple(g['name'] for g in c['gear'])) for c in w['classes']))
+    assert len(set(signatures))>10
+    w=new_world(1);draft=dict(class_id='warden',gear='sword',spells=[spell['id'] for spell in next(c for c in w['classes'] if c['id']=='warden')['spells'][:2]],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
     w['members']['a']=dict(id='a',name='A',ready=True,character=finalize(draft,w['classes']))
     w['status']='active';w['clues']=3;w['stage']=4
     act(w,'a','negotiate');assert w['status']=='complete'
     w['status']='active';w['threat']=6
     act(w,'a','rest');assert w['status']=='failed'
+
+def test_spellbooks_exist_before_character_selection_and_backfill_old_worlds():
+    first=new_world(101);second=new_world(101)
+    assert all(len(cls['spells'])==4 for cls in first['classes'])
+    first['classes'][0]['spells'][0]['name']='Changed locally'
+    assert second['classes'][0]['spells'][0]['name']!='Changed locally'
+
+    legacy=new_world(102)
+    legacy['classes'][0].pop('spells')
+    legacy['classes'][1]['spells']=[]
+    assert ensure_spellbooks(legacy)
+    assert len(legacy['classes'][0]['spells'])==4
+    assert len(legacy['classes'][1]['spells'])==4
+    assert not ensure_spellbooks(legacy)
+
+def test_resumed_lobby_backfills_spellbooks_before_selection(players):
+    cs,ids=players;joined=join(cs[0]);ids.append(joined['id'])
+    with db() as c:
+        state=c.execute('SELECT state FROM sessions WHERE id=%s FOR UPDATE',(joined['id'],)).fetchone()['state']
+        for cls in state['classes']: cls.pop('spells',None)
+        from psycopg.types.json import Jsonb
+        c.execute('UPDATE sessions SET state=%s WHERE id=%s',(Jsonb(state),joined['id']))
+
+    resumed=cs[0].get('/api/session').json()
+    assert all(len(cls['spells'])==4 for cls in resumed['classes'])
+    with db() as c:
+        saved=c.execute('SELECT state FROM sessions WHERE id=%s',(joined['id'],)).fetchone()['state']
+    assert all(len(cls['spells'])==4 for cls in saved['classes'])
+
+def test_equipped_gear_contributes_resources_and_damage():
+    class HighDice:
+        def randint(self,a,b): return b
+    w=new_world(31);cls=w['classes'][0];gear=cls['gear'][0]
+    draft=dict(class_id=cls['id'],gear=gear['id'],spells=[spell['id'] for spell in cls['spells'][:2]],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+    char=finalize(draft,w['classes'])
+    assert equipment_damage_bonus(char)==gear['damage_bonus']
+    assert char['max_'+gear['resource']]==char['base_max_'+gear['resource']]+gear['resource_bonus']
+    w['members']['a']=dict(id='a',name='A',ready=True,character=char)
+    w['status']='active';w['enemy_hp']=100;w['enemy_kind']='enemy'
+    act(w,'a','attack',HighDice())
+    assert w['enemy_hp']==100-(6+char['skills']['Athletics']+gear['damage_bonus'])
+
+def test_equipping_recalculates_resource_bonus(players):
+    cs,ids=players;w=join(cs[0]);ids.append(w['id']);build(cs[0],'warden');send(cs[0],'start')
+    before=cs[0].get('/api/session').json()['me']['character'];weapon=next(item for item in before['inventory'] if item['kind']=='weapon')
+    resource=weapon['resource'];bonus=weapon['resource_bonus']
+    assert send(cs[0],'equip',{'item_id':weapon['id']}).status_code==200
+    unequipped=cs[0].get('/api/session').json()['me']['character']
+    assert unequipped['max_'+resource]==before['max_'+resource]-bonus
+    assert send(cs[0],'equip',{'item_id':weapon['id']}).status_code==200
+    equipped=cs[0].get('/api/session').json()['me']['character']
+    assert equipped['max_'+resource]==before['max_'+resource]
+
+def test_class_spells_require_slots_and_apply_targets():
+    class HighDice:
+        def randint(self,a,b): return b
+    w=new_world(41)
+    mage=next(cls for cls in w['classes'] if cls['id']=='mage')
+    warden=next(cls for cls in w['classes'] if cls['id']=='warden')
+    mage_spells=['ember_bolt','arcane_mending']
+    mage_draft=dict(class_id='mage',gear='staff',spells=mage_spells,attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=2,Persuasion=0))
+    warden_draft=dict(class_id='warden',gear='sword',spells=['guardian_word','rallying_light'],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+    mage_char=finalize(mage_draft,w['classes']);warden_char=finalize(warden_draft,w['classes'])
+    warden_char['hp']=1
+    w['members']={'mage':dict(id='mage',name='Mage',ready=True,character=mage_char),'warden':dict(id='warden',name='Warden',ready=True,character=warden_char)}
+    w['status']='active'
+    text,_=cast_spell(w,'mage','arcane_mending','warden',HighDice())
+    assert warden_char['hp']==min(warden_char['max_hp'],1+6+mage_char['skills']['Arcana'])
+    assert 'Warden' in text
+    with pytest.raises(ValueError,match='no enemy'):cast_spell(w,'mage','ember_bolt','enemy',HighDice())
+    invalid={**mage_draft,'spells':['ember_bolt']}
+    with pytest.raises(ValueError,match='exactly two'):validate_build(invalid,True)
 
 def test_invalid_bool_points():
     with pytest.raises(ValueError):validate_build(dict(attributes=dict(Might=True,Agility=8,Intellect=8,Resolve=8),skills={}))
@@ -220,7 +311,7 @@ def test_later_chapter_rejects_an_unanchored_consequence(monkeypatch):
 def test_fifth_chapter_completion_is_the_scenario_ending():
     from server.app import prepare_chapter_transition
     w=new_world(42)
-    draft=dict(class_id='warden',gear='sword',attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
+    draft=dict(class_id='warden',gear='sword',spells=[spell['id'] for spell in next(c for c in w['classes'] if c['id']=='warden')['spells'][:2]],attributes=dict(Might=10,Agility=10,Intellect=10,Resolve=10),skills=dict(Athletics=1,Stealth=1,Arcana=1,Persuasion=1))
     w['members']['a']=dict(id='a',name='A',ready=True,character=finalize(draft,w['classes']))
     w['chapter']=5;w['chapter_title']='The Final Chapter';w['status']='complete'
     assert prepare_chapter_transition(None,w,'victory in combat','The final enemy falls.') is None
@@ -238,6 +329,42 @@ def test_generation_retries_an_empty_model_response(monkeypatch):
     monkeypatch.setattr('server.app.model_call',respond)
     assert generate_scenario({'mode':'openrouter','model':'openrouter/free','max_tokens':300},'secret',42,1)['title']==candidate['title']
     assert len(calls)==2 and calls[-1]['json_schema']['type']=='object'
+
+def test_initial_generation_does_not_hold_session_lock(players,monkeypatch,ai_generation):
+    cs,ids=players; w=join(cs[0]); ids.append(w['id']); build(cs[0],'warden')
+    def generate(*args,**kwargs):
+        with db() as c:
+            pending=c.execute('SELECT state FROM sessions WHERE id=%s FOR UPDATE NOWAIT',(w['id'],)).fetchone()['state']
+            assert pending['status']=='generating' and pending['pending_chapter']==1
+        return generated_fixture('unlocked')
+    monkeypatch.setattr('server.app.generate_scenario',generate)
+    result=send(cs[0],'start')
+    assert result.status_code==200 and result.json()['generation_source']=='ai'
+    assert result.json()['chapter_title']=='The Glass Orchard unlocked'
+
+def test_abandoned_generation_recovers_on_session_read(players):
+    import time
+    from psycopg.types.json import Jsonb
+    cs,ids=players; w=join(cs[0]); ids.append(w['id']); build(cs[0],'warden')
+    with db() as c:
+        state=c.execute('SELECT state FROM sessions WHERE id=%s FOR UPDATE',(w['id'],)).fetchone()['state']
+        state.update(status='generating',pending_chapter=1,generation_started_at=time.time()-500)
+        c.execute('UPDATE sessions SET state=%s WHERE id=%s',(Jsonb(state),w['id']))
+    recovered=cs[0].get('/api/session').json()
+    assert recovered['status']=='active' and recovered['generation_source']=='fallback'
+    assert recovered['chapter']==1 and recovered['journal'][-1]['text']==DEFAULT_SCENARIO['opening']
+    assert cs[0].get('/api/session').json()['version']==recovered['version']
+
+def test_host_fallback_wins_over_late_provider_result(players,monkeypatch,ai_generation):
+    cs,ids=players; w=join(cs[0]); ids.append(w['id']); build(cs[0],'warden')
+    def generate(*args,**kwargs):
+        fallback=cs[0].post('/api/generation/fallback',json={})
+        assert fallback.status_code==200 and fallback.json()['generation_source']=='fallback'
+        return generated_fixture('too-late')
+    monkeypatch.setattr('server.app.generate_scenario',generate)
+    response=send(cs[0],'start')
+    assert response.status_code==200 and response.json()['generation_source']=='fallback'
+    assert response.json()['chapter_title'].startswith('The Ashen Bell')
 
 def test_generated_scenario_rejects_playtest_content(monkeypatch):
     import json
@@ -301,6 +428,7 @@ def test_openrouter_reasoning_is_excluded(monkeypatch):
     from server.app import model_call
     captured={}
     class Response:
+        status_code=200
         def raise_for_status(self):pass
         def json(self):return {'choices':[{'message':{'content':'A concise narration.'}}]}
     class Client:
@@ -317,6 +445,7 @@ def test_openrouter_generation_uses_strict_schema_with_minimal_reasoning(monkeyp
     from server.app import model_call
     captured={}
     class Response:
+        status_code=200
         def raise_for_status(self):pass
         def json(self):return {'choices':[{'message':{'content':'{}'}}]}
     class Client:

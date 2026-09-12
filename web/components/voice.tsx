@@ -1,9 +1,9 @@
 'use client';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Volume2, VolumeX, SkipForward, RotateCcw, Pause, Play } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Slider } from '@/components/ui/slider';
-import { api, type World } from '@/lib/game';
+import { api, isSafetyMessage, type World } from '@/lib/game';
 
 /** Lightweight narration controls backed only by the browser speech engine. */
 export function Voice({ world }: { world: World }) {
@@ -14,15 +14,15 @@ export function Voice({ world }: { world: World }) {
     [status, setStatus] = useState(''),
     [volume, setVolume] = useState(0.8),
     [paused, setPaused] = useState(false);
-  const latest = world.journal.at(-1);
+  const latest = world.journal.filter((entry) => !isSafetyMessage(entry.text) && !isSafetyMessage(entry.prose)).at(-1);
 
-  function stop() {
+  const stop = useCallback(() => {
     window.speechSynthesis?.cancel();
     current.current = null;
     setPaused(false);
-  }
+  }, []);
 
-  function speak(text: string) {
+  const speak = useCallback((text: string) => {
     if (!('speechSynthesis' in window)) {
       setStatus('Browser speech is unavailable. Text remains available.');
       return;
@@ -36,15 +36,15 @@ export function Voice({ world }: { world: World }) {
     utterance.onerror = () => { current.current = null; setPaused(false); setStatus('Browser voice could not play. Text remains available.'); };
     current.current = utterance;
     window.speechSynthesis.speak(utterance);
-  }
+  }, [stop]);
 
-  async function enqueue(entry: NonNullable<typeof latest>, force = false) {
+  const enqueue = useCallback(async (entry: NonNullable<typeof latest>, force = false) => {
     if (seen.current.has(entry.id)) return;
     seen.current.add(entry.id);
     let text = entry.prose || entry.text;
     try { text = (await api<{ text: string }>('/narrate/' + entry.id, {})).text; } catch { /* text is a safe fallback */ }
     if (enabled || force) speak(text);
-  }
+  }, [enabled, speak]);
 
   function toggle() {
     if (enabled) {
@@ -63,8 +63,8 @@ export function Voice({ world }: { world: World }) {
 
   useEffect(() => {
     if (enabled && latest) void enqueue(latest);
-  }, [latest?.id, enabled]);
-  useEffect(() => () => stop(), []);
+  }, [latest, enabled, enqueue]);
+  useEffect(() => () => stop(), [stop]);
 
   return (
     <div className="voice-controls">

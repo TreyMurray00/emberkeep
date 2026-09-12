@@ -1,5 +1,6 @@
 'use client';
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import {
   Flame,
   ArrowLeft,
@@ -45,7 +46,8 @@ export default function Admin() {
     }
   }
   useEffect(() => {
-    load();
+    const timer = setTimeout(() => void load(), 0);
+    return () => clearTimeout(timer);
   }, []);
   async function login() {
     setBusy(true);
@@ -86,16 +88,16 @@ export default function Admin() {
   return (
     <div className="shell">
       <header className="masthead">
-        <a className="brand" href="/">
+        <Link className="brand" href="/">
           <Flame />
           <span>
             EMBERKEEP<small>THE KEEPER’S STUDY</small>
           </span>
-        </a>
-        <a href="/" className="feature-line">
+        </Link>
+        <Link href="/" className="feature-line">
           <ArrowLeft size={17} />
           Return to the table
-        </a>
+        </Link>
       </header>
       <main className="admin-layout">
         <p className="eyebrow">ADMINISTRATION</p>
@@ -105,9 +107,9 @@ export default function Admin() {
           built-in browser voice when enabled.
         </p>
         {message && (
-          <div className="notice" role="status">
+          <output className="notice">
             {message}
-          </div>
+          </output>
         )}
         {loading ? (
           <p>Opening settings…</p>
@@ -121,7 +123,7 @@ export default function Admin() {
             <form
               onSubmit={(e) => {
                 e.preventDefault();
-                login();
+                void login();
               }}
             >
               <label>
