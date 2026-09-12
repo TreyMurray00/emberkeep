@@ -116,7 +116,7 @@ To link a fresh checkout and apply the policy:
 ```powershell
 npm install --global neon@latest
 neon auth
-neon link --project-id noisy-cloud-08360518 --branch production -y
+neon link --project-id noisy-******-******** --branch production -y
 neon config plan
 neon deploy
 ```
